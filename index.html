@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live TV</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      background: #000;
+      color: #fff;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      user-select: none;
+    }
+
+    /* Video & Fallback Layers */
+    #hls-player, #yt-player {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: none;
+      background: #000;
+      display: none;
+    }
+    #hls-player { object-fit: contain; }
+    #yt-player { pointer-events: none; }
+
+    /* Keeps keyboard/remote focus on our window */
+    #remote-shield {
+      position: fixed;
+      inset: 0;
+      z-index: 5;
+      background: transparent;
+    }
+
+    /* High-contrast top-left OSD (never blocks bottom news tickers) */
+    #osd {
+      position: fixed;
+      top: 36px;
+      left: 36px;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      background: rgba(10, 10, 14, 0.9);
+      border-left: 8px solid #e50914;
+      padding: 18px 28px;
+      border-radius: 10px;
+      opacity: 0;
+      transform: translateY(-8px);
+      transition: opacity 0.25s ease, transform 0.25s ease;
+      pointer-events: none;
+      max-width: 75vw;
+    }
+    #osd.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    #osd-logo {
+      width: 68px;
+      height: 68px;
+      object-fit: contain;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 6px;
+      flex-shrink: 0;
+    }
+    #osd-num {
+      font-size: 20px;
+      color: #ff6b6b;
+      font-weight: 700;
+      letter-spacing: 1px;
+    }
+    #osd-name {
+      font-size: 36px;
+      font-weight: 700;
+      line-height: 1.15;
+      margin-top: 2px;
+    }
+    #osd-status {
+      font-size: 16px;
+      color: #b8c0cc;
+      margin-top: 6px;
+    }
+
+    /* Direct number entry box (top-right) */
+    #num-entry {
+      position: fixed;
+      top: 36px;
+      right: 36px;
+      z-index: 25;
+      background: rgba(10, 10, 14, 0.92);
+      border: 2px solid #e50914;
+      border-radius: 10px;
+      padding: 14px 28px;
+      font-size: 44px;
+      font-weight: 700;
+      letter-spacing: 4px;
+      display: none;
+    }
+
+    /* Center loading / offline message */
+    #center-msg {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 15;
+      text-align: center;
+      background: rgba(12, 12, 16, 0.92);
+      border: 1px solid #333;
+      border-radius: 12px;
+      padding: 28px 40px;
+      display: none;
+      max-width: 80vw;
+    }
+    #center-msg h2 { font-size: 30px; margin-bottom: 10px; }
+    #center-msg p { font-size: 18px; color: #b8c0cc; }
+
+    /* Desktop autoplay unmute prompt */
+    #unmute-pill {
+      position: fixed;
+      bottom: 40px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 30;
+      background: #e50914;
+      color: #fff;
+      font-size: 20px;
+      font-weight: 700;
+      padding: 14px 28px;
+      border-radius: 999px;
+      border: none;
+      cursor: pointer;
+      display: none;
+    }
+
+    /* Optional channel list drawer (Back button on TV, M key or hover button on PC) */
+    #drawer {
+      position: fixed;
+      top: 0;
+      right: 0;
+      width: 390px;
+      max-width: 90vw;
+      height: 100%;
+      z-index: 40;
+      background: rgba(10, 10, 14, 0.96);
+      border-left: 2px solid #2a2a35;
+      padding: 24px 18px;
+      display: none;
+      flex-direction: column;
+    }
+    #drawer.open { display: flex; }
+    #drawer-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 14px;
+      border-bottom: 1px solid #2a2a35;
+      margin-bottom: 12px;
+    }
+    #drawer-header h3 { font-size: 22px; }
+    #drawer-header span { font-size: 13px; color: #9ca3af; }
+    #channel-list {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .ch-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #181820;
+      border: 2px solid transparent;
+      cursor: pointer;
+      color: #fff;
+      text-align: left;
+      width: 100%;
+      font-size: 18px;
+    }
+    .ch-item:hover { background: #242432; }
+    .ch-item.active {
+      background: #2b1418;
+      border-color: #e50914;
+    }
+    .ch-item img {
+      width: 34px;
+      height: 34px;
+      object-fit: contain;
+      flex-shrink: 0;
+    }
+    .ch-idx {
+      width: 28px;
+      color: #ff6b6b;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .ch-meta {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .ch-bn { font-weight: 700; font-size: 17px; }
+    .ch-en { font-size: 13px; color: #9ca3af; }
+
+    #drawer-footer {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid #2a2a35;
+      font-size: 13px;
+      color: #9ca3af;
+      line-height: 1.5;
+    }
+
+    /* Subtle desktop test controls (only appear when mouse moves) */
+    #pc-controls {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 35;
+      display: flex;
+      gap: 8px;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      pointer-events: none;
+    }
+    #pc-controls.show {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .pc-btn {
+      background: rgba(20, 20, 28, 0.88);
+      color: #fff;
+      border: 1px solid #444;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .pc-btn:hover { background: #e50914; border-color: #e50914; }
+  </style>
+</head>
+<body>
+  <video id="hls-player" autoplay playsinline></video>
+
+  <iframe
+    id="yt-player"
+    tabindex="-1"
+    allow="autoplay; encrypted-media; fullscreen"
+    referrerpolicy="strict-origin-when-cross-origin"
+    allowfullscreen
+  ></iframe>
+
+  <div id="remote-shield"></div>
+
+  <div id="osd">
+    <img id="osd-logo" alt="">
+    <div>
+      <div id="osd-num"></div>
+      <div id="osd-name"></div>
+      <div id="osd-status"></div>
+    </div>
+  </div>
+
+  <div id="num-entry"></div>
+
+  <div id="center-msg">
+    <h2 id="center-title"></h2>
+    <p id="center-sub"></p>
+  </div>
+
+  <button id="unmute-pill">Click or Press OK to Unmute</button>
+
+  <div id="drawer">
+    <div id="drawer-header">
+      <h3>Channels (14)</h3>
+      <span>Back / M to close</span>
+    </div>
+    <div id="channel-list"></div>
+    <div id="drawer-footer">
+      <strong>Up/Down:</strong> Flip Channel &nbsp;|&nbsp;
+      <strong>Left/Right:</strong> Try Backup Link<br>
+      <strong>OK/Enter:</strong> Reload &nbsp;|&nbsp;
+      <strong>1–14:</strong> Direct Jump<br>
+      <strong>Color Keys:</strong> Red=Somoy, Green=Jamuna, Yellow=Star Jalsha, Blue=Zee Bangla
+    </div>
+  </div>
+
+  <div id="pc-controls">
+    <button class="pc-btn" onclick="tune(current - 1)">CH -</button>
+    <button class="pc-btn" onclick="tune(current + 1)">CH +</button>
+    <button class="pc-btn" onclick="switchSource(1)">Next Backup</button>
+    <button class="pc-btn" onclick="toggleDrawer()">Channel List</button>
+  </div>
+
+  <script>
+    const CHANNELS = [
+      {
+        name: "ATN Bangla",
+        bn: "এটিএন বাংলা",
+        logo: "https://raw.githubusercontent.com/saeidrahmanbd/BDIX-IPTV/main/logos/atn-bangla.png",
+        streams: [
+          "https://tvsen5.aynaott.com/atnbangla/index.m3u8",
+          "https://tvsen5.aynaott.com/P3y2URgG7LDe/index.m3u8",
+          "https://app24.jagobd.com.bd/c3VydmVyX8RpbEU9Mi8xNy8yMFDEEHGcfRgzQ6NTAgdEoaeFzbF92YWxIZTO0U0ezN1IzMyfvcEdsEfeDeKiNkVN3PTOmdFseWRtaW51aiPhnPTI2/atnbd-8-org.stream/tracks-v1a1/mono.m3u8",
+          "https://iptvlive.ahmed-bd-org.workers.dev/atn-bangla-1/index.m3u8",
+          "http://tvsen5.aynascope.net/atnbangla/index.m3u8"
+        ],
+        yt: ""
+      },
+      {
+        name: "ATN News",
+        bn: "এটিএন নিউজ",
+        logo: "https://raw.githubusercontent.com/saeidrahmanbd/BDIX-IPTV/main/logos/atn-news-e0442addb4.png",
+        streams: [
+          "https://tvsen6.aynaott.com/da6WMXAk/index.m3u8",
+          "https://app24.jagobd.com.bd/c3VydmVyX8RpbEU9Mi8xNy8yMFDEEHGcfRgzQ6NTAgdEoaeFzbF92YWxIZTO0U0ezN1IzMyfvcEdsEfeDeKiNkVN3PTOmdFseWRtaW51aiPhnPTI2/atnws-sg.stream/tracks-v1a1/mono.m3u8",
+          "https://iptv-proxy.ahmed-bd-org.workers.dev/atn-news/index.m3u8"
+        ],
+        yt: "UC9Rgo0CrNyd7OWliLekqqGA"
+      },
+      {
+        name: "Bangla Vision",
+        bn: "বাংলাভিশন",
+        logo: "https://raw.githubusercontent.com/saeidrahmanbd/BDIX-IPTV/main/logos/banglavision.png",
+        streams: [
+          "https://tvsen5.aynaott.com/banglavision/index.m3u8",
+          "https://tvsen5.aynaott.com/tgUzpPc9r6xw/index.m3u8",
+          "https://app24.jagobd.com.bd/c3VydmVyX8RpbEU9Mi8xNy8yMFDEEHGcfRgzQ6NTAgdEoaeFzbF92YWxIZTO0U0ezN1IzMyfvcEdsEfeDeKiNkVN3PTOmdFseWRtaW51aiPhnPTI2/banglav000.stream/tracks-v1a1/mono.m3u8",
+          "https://iptvlive.ahmed-bd-org.workers.dev/banglavision-1/index.m3u8"
+        ],
+        yt: ""
+      },
+      {
+        name: "Channel 24",
+        bn: "চ্যানেল ২৪",
+        logo: "https://raw.githubusercontent.com/saeidrahmanbd/BDIX-IPTV/main/logos/channel-24.png",
+        streams: [
+          "https://tvsen6.aynaott.com/YrVDF8gujkdh/index.m3u8",
+          "https://drk6xq0vhn.gpcdn.net/live/channel_24_abr/index.m3u8",
+          "https://stream.ottplus.live/live/channel_24_abr/index.m3u8",
+          "https://iptvlive.ahmed-bd-org.workers.dev/channel-24-hd-1/index.m3u8",
+          "http://103.135.253.32:8080/Channel-24/index.m3u8"
+        ],
+        yt: "UCHLqIOMPk20w-6cFgkA90jw"
+      },
+      {
+        name: "Ekattor TV",
+        bn: "একাত্তর টিভি",
+        logo: "https://raw.githubusercontent.com/saeidrahmanbd/BDIX-IPTV/main/logos/ekattor-tv.png",
+        streams: [
+          "https://tvsen6.aynaott.com/EWDrV5QskgarZEUBb3pU/index.m3u8",
+          "https://stream.ottplus.live/live/ekattor_tv_abr/index.m3u8"
+        ],
+        yt: ""
+      },
+      {
+        name: "Independent TV",
+        bn: "ইনডিপেনডেন্ট টিভি",
+        logo: "https://raw.githubusercontent.com/saeidrahmanbd/BDIX-IPTV/main/logos/independent-tv.png",
+        streams: [
+          "http://premiumtvs.space/live/YqXTywueEV/damp2purchase/423.ts"
+        ],
+        yt: "UCATUkaOHwO9EP_W87zCiPbA"
+      },
+      {
+        name: "Jamuna TV",
+        bn: "যমুনা টিভি",
+        logo: "https://raw.githubusercontent.com/saeidrahmanbd/BDIX-IPTV/main/logos/jamuna-tv.png",
+        streams: [
+          "https://tvsen6.aynaott.com/KGdZEdA7qQ43dmPkgk1j/index.m3u8",
+          "https://stream.ottplus.live/live/jamuna_tv_abr/index.m3u8",
+          "https://iptv-proxy.ahmed-bd-org.workers.dev/jamuna-tv/index.m3u8",
+          "https://iptvlive.ahmed-bd-org.workers.dev/jamuna-tv-1/index.m3u8"
+        ],
+        yt: "UCN6sm8iHiPd0cnoUardDAnw"
+      },
+      {
+        name: "Somoy TV",
+        bn: "সময় টিভি",
+        logo: "https://raw.githubusercontent.com/saeidrahmanbd/BDIX-IPTV/main/logos/somoy-tv.png",
+        streams: [
+          "https://tvsen6.aynaott.com/4XcqdovJzbbC9WdJA9gk/index.m3u8",
+          "https://tvsen5.aynaott.com/somoytv/tracks-v1a1/mono.m3u8",
+          "https://drk6xq0vhn.gpcdn.net/live/somoy_tv_abr/index.m3u8",
+          "https://iptvlive.ahmed-bd-org.workers.dev/somoy-tv-2/index.m3u8",
+          "http://116.204.149.16/somoytv/index.m3u8"
+        ],
+        yt: "UCxHoBXkY88Tb8z1Ssj6CWsQ"
+      },
+      {
+        name: "Jalsha Movies",
+        bn: "জলসা মুভিজ",
+        logo: "https://raw.githubusercontent.com/saeidrahmanbd/BDIX-IPTV/main/logos/jalsha-movies.png",
+        streams: [
+          "https://box.bbaria.net:8083/Jalsha_Movie/tracks-v1a1/mono.m3u8",
+          "https://livetv.shamon-cable.net:8443/Jalsha-Movies/index.m3u8",
+          "http://103.135.253.32:8080/Jalsha_movies-HD/index.m3u8"
+        ],
+        yt: ""
+      },
+      {
+        name: "Star Jalsha",
+        bn: "স্টার জলসা",
+        logo: "https://raw.githubusercontent.com/saeidrahmanbd/BDIX-IPTV/main/logos/star-jalsha.png",
+        streams: [
+          "https://da86m1sqpm3o0.cloudfront.net/28072023/smil:starjalsha.smil/chunklist_b1928000.m3u8",
+          "https://livetv.shamon-cable.net:8443/Star-Jalsha/index.m3u8",
+          "http://103.135.253.32:8080/STAR-JALSHA-HD/index.m3u8"
+        ],
+        yt: ""
+      },
+      {
+        name: "Zee Bangla",
+        bn: "জি বাংলা",
+        logo: "https://raw.githubusercontent.com/saeidrahmanbd/BDIX-IPTV/main/logos/zee-bangla.png",
+        streams: [
+          "https://tvsen6.aynaott.com/ZeeBangla/index.m3u8",
+          "https://drk6xq0vhn.gpcdn.net/live/zee_bangla_720/index.m3u8",
+          "https://livetv.shamon-cable.net:8443/ZEE-Bangla/index.m3u8",
+          "https://d1rc86nwwc9fag.cloudfront.net/260723/smil:zeebangla.smil/chunklist_b896000.m3u8",
+          "https://iptvlive.ahmed-bd-org.workers.dev/zee-bangla-hd-2/index.m3u8",
+          "https://raw.githubusercontent.com/ahan443/vibe-tv/refs/heads/main/ZeeBanglaHD.m3u8",
+          "https://raw.githubusercontent.com/amazeyourself/adaptive-streams/refs/heads/main/streams/in/YuppTV/ZeeBanglaHD.m3u8"
+        ],
+        yt: ""
+      },
+      {
+        name: "BBC Earth",
+        bn: "বিবিসি আর্থ",
+        logo: "https://raw.githubusercontent.com/saeidrahmanbd/BDIX-IPTV/main/logos/bbc-earth.png",
+        streams: [
+          "https://amg00793-amg00793c6-xumo-us-2669.playouts.now.amagi.tv/BBCStudios-BBCEarthA-hls/playlist.m3u8"
+        ],
+        yt: ""
+      },
+      {
+        name: "Discovery",
+        bn: "ডিসকভারি",
+        logo: "https://raw.githubusercontent.com/saeidrahmanbd/BDIX-IPTV/main/logos/discovery-hd.png",
+        streams: [
+          "https://tvsen3.aynaott.com/Zht5VqBb/index.m3u8",
+          "https://drk6xq0vhn.gpcdn.net/live/discovery_hd_abr/index.m3u8"
+        ],
+        yt: ""
+      },
+      {
+        name: "Animal Planet",
+        bn: "অ্যানিমেল প্ল্যানেট",
+        logo: "https://raw.githubusercontent.com/saeidrahmanbd/BDIX-IPTV/main/logos/animal-planet.png",
+        streams: [
+          "https://tvsen3.aynaott.com/wpa56Uk3/index.m3u8",
+          "https://drk6xq0vhn.gpcdn.net/live/animal_planet_hd/index.m3u8",
+          "https://vodzong.mjunoon.tv:8087/streamtest/Animal-Planet-158-3/playlist.m3u8"
+        ],
+        yt: ""
+      }
+    ];
+
+    const videoEl = document.getElementById("hls-player");
+    const ytFrame = document.getElementById("yt-player");
+    const osd = document.getElementById("osd");
+    const osdLogo = document.getElementById("osd-logo");
+    const osdNum = document.getElementById("osd-num");
+    const osdName = document.getElementById("osd-name");
+    const osdStatus = document.getElementById("osd-status");
+    const centerMsg = document.getElementById("center-msg");
+    const centerTitle = document.getElementById("center-title");
+    const centerSub = document.getElementById("center-sub");
+    const numEntryEl = document.getElementById("num-entry");
+    const unmutePill = document.getElementById("unmute-pill");
+    const drawer = document.getElementById("drawer");
+    const channelListEl = document.getElementById("channel-list");
+    const pcControls = document.getElementById("pc-controls");
+
+    const IS_HTTPS = window.location.protocol === "https:";
+    const SOURCE_TIMEOUT_MS = 8500;
+
+    let current = parseInt(localStorage.getItem("momtv_ch") || "0", 10);
+    if (isNaN(current) || current < 0 || current >= CHANNELS.length) current = 0;
+
+    let hls = null;
+    let currentSourceIdx = 0;
+    let activeSources = [];
+    let tuneToken = 0;
+    let osdTimer = null;
+    let sourceTimer = null;
+    let wheelLock = false;
+    let numBuffer = "";
+    let numTimer = null;
+    let mouseTimer = null;
+
+    function pad2(n) {
+      return n < 10 ? "0" + n : String(n);
+    }
+
+    function buildDrawer() {
+      channelListEl.innerHTML = "";
+      CHANNELS.forEach((ch, idx) => {
+        const btn = document.createElement("button");
+        btn.className = "ch-item" + (idx === current ? " active" : "");
+        btn.innerHTML =
+          '<span class="ch-idx">' + pad2(idx + 1) + '</span>' +
+          '<img src="' + ch.logo + '" alt="" onerror="this.style.display=\'none\'">' +
+          '<span class="ch-meta"><span class="ch-bn">' + ch.bn + '</span><span class="ch-en">' + ch.name + '</span></span>';
+        btn.onclick = () => {
+          toggleDrawer(false);
+          tune(idx);
+        };
+        channelListEl.appendChild(btn);
+      });
+    }
+
+    function updateDrawerHighlight() {
+      const items = channelListEl.querySelectorAll(".ch-item");
+      items.forEach((el, idx) => {
+        el.classList.toggle("active", idx === current);
+      });
+    }
+
+    function toggleDrawer(forceState) {
+      const next = typeof forceState === "boolean" ? forceState : !drawer.classList.contains("open");
+      drawer.classList.toggle("open", next);
+      if (next) {
+        updateDrawerHighlight();
+        const active = channelListEl.querySelector(".ch-item.active");
+        if (active) active.scrollIntoView({ block: "center" });
+      }
+    }
+
+    function showBanner(index, statusText, sticky) {
+      const ch = CHANNELS[index];
+      osdLogo.style.display = "block";
+      osdLogo.src = ch.logo;
+      osdLogo.onerror = () => { osdLogo.style.display = "none"; };
+      osdNum.textContent = "CH " + pad2(index + 1) + " / " + pad2(CHANNELS.length);
+      osdName.textContent = ch.bn + " • " + ch.name;
+      osdStatus.textContent = statusText || "";
+      osd.classList.add("visible");
+      clearTimeout(osdTimer);
+      if (!sticky) {
+        osdTimer = setTimeout(() => osd.classList.remove("visible"), 3800);
+      }
+    }
+
+    function showCenterMessage(title, sub) {
+      centerTitle.textContent = title;
+      centerSub.textContent = sub;
+      centerMsg.style.display = "block";
+    }
+
+    function hideCenterMessage() {
+      centerMsg.style.display = "none";
+    }
+
+    function stopMedia() {
+      clearTimeout(sourceTimer);
+      if (hls) {
+        hls.destroy();
+        hls = null;
+      }
+      videoEl.onplaying = null;
+      videoEl.onerror = null;
+      videoEl.pause();
+      videoEl.removeAttribute("src");
+      videoEl.style.display = "none";
+
+      ytFrame.src = "about:blank";
+      ytFrame.style.display = "none";
+    }
+
+    function safePlayVideo(token) {
+      videoEl.muted = false;
+      const p = videoEl.play();
+      if (p && typeof p.catch === "function") {
+        p.catch(() => {
+          if (token !== tuneToken) return;
+          // Desktop browser autoplay policy: start muted and show 1-click unmute pill
+          videoEl.muted = true;
+          videoEl.play().catch(() => {});
+          unmutePill.style.display = "block";
+        });
+      }
+    }
+
+    function unmuteIfNeeded() {
+      if (videoEl.muted) {
+        videoEl.muted = false;
+        videoEl.play().catch(() => {});
+      }
+      unmutePill.style.display = "none";
+    }
+
+    unmutePill.addEventListener("click", unmuteIfNeeded);
+    document.getElementById("remote-shield").addEventListener("click", unmuteIfNeeded);
+
+    function getEligibleSources(ch) {
+      return ch.streams.filter((url) => {
+        // On HTTPS pages (GitHub Pages), browsers block plain http:// streams
+        if (IS_HTTPS && url.startsWith("http://")) return false;
+        return true;
+      });
+    }
+
+    function playYouTubeFallback(ch, index, token) {
+      if (token !== tuneToken) return;
+      stopMedia();
+      hideCenterMessage();
+
+      if (!ch.yt) {
+        showBanner(index, "OFFLINE — All links failed", true);
+        showCenterMessage(ch.bn + " (" + ch.name + ") is currently offline", "Press UP or DOWN to switch channels, or OK to retry.");
+        return;
+      }
+
+      if (window.location.protocol === "file:") {
+        showBanner(index, "YouTube Fallback (Needs Local Server / HTTPS)", true);
+        showCenterMessage(
+          ch.name + " uses YouTube Fallback",
+          "Run via http://localhost:8000 or GitHub Pages to play YouTube fallback (file:// blocks embeds)."
+        );
+        return;
+      }
+
+      ytFrame.style.display = "block";
+      ytFrame.src =
+        "https://www.youtube.com/embed/live_stream?channel=" +
+        encodeURIComponent(ch.yt) +
+        "&autoplay=1&mute=0&controls=0&rel=0&playsinline=1";
+      showBanner(index, "LIVE • YouTube Fallback");
+    }
+
+    function tryNativeSource(url, ch, index, srcIdx, token, onFail) {
+      if (token !== tuneToken) return;
+      stopMedia();
+      videoEl.style.display = "block";
+      videoEl.src = url;
+
+      let settled = false;
+      sourceTimer = setTimeout(() => {
+        if (!settled && token === tuneToken) {
+          settled = true;
+          onFail();
+        }
+      }, SOURCE_TIMEOUT_MS);
+
+      videoEl.onplaying = () => {
+        if (token !== tuneToken) return;
+        settled = true;
+        clearTimeout(sourceTimer);
+        hideCenterMessage();
+        showBanner(index, "LIVE • AD-FREE (Source " + (srcIdx + 1) + "/" + activeSources.length + ")");
+      };
+
+      videoEl.onerror = () => {
+        if (!settled && token === tuneToken) {
+          settled = true;
+          clearTimeout(sourceTimer);
+          onFail();
+        }
+      };
+
+      safePlayVideo(token);
+    }
+
+    function trySource(srcIdx, token) {
+      if (token !== tuneToken) return;
+      const ch = CHANNELS[current];
+
+      if (srcIdx >= activeSources.length) {
+        playYouTubeFallback(ch, current, token);
+        return;
+      }
+
+      currentSourceIdx = srcIdx;
+      const url = activeSources[srcIdx];
+      const label = "Loading Source " + (srcIdx + 1) + "/" + activeSources.length + "...";
+      showBanner(current, label, true);
+      showCenterMessage(ch.bn + " • " + ch.name, label);
+
+      const moveNext = () => {
+        if (token !== tuneToken) return;
+        trySource(srcIdx + 1, token);
+      };
+
+      const isHlsPlaylist = url.indexOf(".m3u8") !== -1;
+
+      if (isHlsPlaylist && window.Hls && Hls.isSupported()) {
+        stopMedia();
+        videoEl.style.display = "block";
+
+        let settled = false;
+        sourceTimer = setTimeout(() => {
+          if (!settled && token === tuneToken) {
+            settled = true;
+            // If hls.js stalls (often CORS on webOS), try native <video> if supported
+            if (videoEl.canPlayType("application/vnd.apple.mpegurl")) {
+              tryNativeSource(url, ch, current, srcIdx, token, moveNext);
+            } else {
+              moveNext();
+            }
+          }
+        }, SOURCE_TIMEOUT_MS);
+
+        hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: false,
+          maxBufferLength: 20,
+          manifestLoadingTimeOut: 7000,
+          levelLoadingTimeOut: 7000
+        });
+
+        hls.attachMedia(videoEl);
+        hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+          if (token === tuneToken && hls) hls.loadSource(url);
+        });
+
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          if (token === tuneToken) safePlayVideo(token);
+        });
+
+        videoEl.onplaying = () => {
+          if (token !== tuneToken) return;
+          settled = true;
+          clearTimeout(sourceTimer);
+          hideCenterMessage();
+          showBanner(current, "LIVE • AD-FREE (Source " + (srcIdx + 1) + "/" + activeSources.length + ")");
+        };
+
+        hls.on(Hls.Events.ERROR, (event, data) => {
+          if (token !== tuneToken || !data.fatal || settled) return;
+          settled = true;
+          clearTimeout(sourceTimer);
+          if (videoEl.canPlayType("application/vnd.apple.mpegurl")) {
+            tryNativeSource(url, ch, current, srcIdx, token, moveNext);
+          } else {
+            moveNext();
+          }
+        });
+      } else {
+        tryNativeSource(url, ch, current, srcIdx, token, moveNext);
+      }
+    }
+
+    function tune(index, startSourceIdx) {
+      current = (index + CHANNELS.length) % CHANNELS.length;
+      localStorage.setItem("momtv_ch", String(current));
+      updateDrawerHighlight();
+
+      const token = ++tuneToken;
+      const ch = CHANNELS[current];
+      activeSources = getEligibleSources(ch);
+
+      const initialIdx = typeof startSourceIdx === "number" ? startSourceIdx : 0;
+      if (activeSources.length === 0) {
+        playYouTubeFallback(ch, current, token);
+      } else {
+        trySource(initialIdx % activeSources.length, token);
+      }
+    }
+
+    function switchSource(delta) {
+      if (activeSources.length <= 1) {
+        tune(current, 0);
+        return;
+      }
+      const nextSrc = (currentSourceIdx + delta + activeSources.length) % activeSources.length;
+      tune(current, nextSrc);
+    }
+
+    function handleDigit(digit) {
+      clearTimeout(numTimer);
+      numBuffer += String(digit);
+      numEntryEl.textContent = "CH " + numBuffer;
+      numEntryEl.style.display = "block";
+
+      const val = parseInt(numBuffer, 10);
+      // Jump immediately if 2 digits typed or if adding another digit would exceed total channels
+      if (numBuffer.length >= 2 || val * 10 > CHANNELS.length) {
+        numTimer = setTimeout(() => {
+          numEntryEl.style.display = "none";
+          numBuffer = "";
+          if (val >= 1 && val <= CHANNELS.length) tune(val - 1);
+        }, 250);
+      } else {
+        numTimer = setTimeout(() => {
+          numEntryEl.style.display = "none";
+          numBuffer = "";
+          if (val >= 1 && val <= CHANNELS.length) tune(val - 1);
+        }, 1100);
+      }
+    }
+
+    window.addEventListener("keydown", (e) => {
+      unmuteIfNeeded();
+      const code = e.keyCode;
+
+      if (code === 38 || code === 33) {
+        // Up arrow / Channel Up
+        e.preventDefault();
+        tune(current + 1);
+      } else if (code === 40 || code === 34) {
+        // Down arrow / Channel Down
+        e.preventDefault();
+        tune(current - 1);
+      } else if (code === 39) {
+        // Right arrow: try next backup source
+        e.preventDefault();
+        switchSource(1);
+      } else if (code === 37) {
+        // Left arrow: try previous backup source
+        e.preventDefault();
+        switchSource(-1);
+      } else if (code === 13) {
+        // OK / Enter: reload current channel
+        e.preventDefault();
+        tune(current);
+      } else if (code === 461 || code === 77 || code === 27) {
+        // LG Back (461), M key, or Escape: toggle channel list drawer
+        e.preventDefault();
+        toggleDrawer();
+      } else if (code >= 48 && code <= 57) {
+        // Number keys 0-9
+        e.preventDefault();
+        handleDigit(code - 48);
+      } else if (code >= 96 && code <= 105) {
+        // Desktop Numpad 0-9
+        e.preventDefault();
+        handleDigit(code - 96);
+      } else if (code === 403) {
+        e.preventDefault(); tune(7);  // Red -> Somoy TV (CH 08)
+      } else if (code === 404) {
+        e.preventDefault(); tune(6);  // Green -> Jamuna TV (CH 07)
+      } else if (code === 405) {
+        e.preventDefault(); tune(9);  // Yellow -> Star Jalsha (CH 10)
+      } else if (code === 406) {
+        e.preventDefault(); tune(10); // Blue -> Zee Bangla (CH 11)
+      }
+    });
+
+    // Magic Remote scroll wheel / mouse wheel
+    window.addEventListener("wheel", (e) => {
+      if (drawer.classList.contains("open")) return;
+      if (wheelLock) return;
+      wheelLock = true;
+      if (e.deltaY < 0) tune(current + 1);
+      else if (e.deltaY > 0) tune(current - 1);
+      setTimeout(() => { wheelLock = false; }, 450);
+    });
+
+    // Show subtle mouse controls on desktop only when moving cursor
+    window.addEventListener("mousemove", () => {
+      pcControls.classList.add("show");
+      clearTimeout(mouseTimer);
+      mouseTimer = setTimeout(() => pcControls.classList.remove("show"), 2500);
+    });
+
+    buildDrawer();
+    tune(current);
+  </script>
+</body>
+</html>
